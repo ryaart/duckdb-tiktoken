@@ -1,0 +1,146 @@
+# name: test/sql/tiktoken.test
+# description: tiktoken_* functions; expected tokens are from Python tiktoken 0.14 encode_ordinary
+# group: [tiktoken]
+
+statement error
+SELECT tiktoken_count('hello');
+----
+Catalog Error: Scalar Function with name tiktoken_count does not exist!
+
+require tiktoken
+
+# ---- encode: o200k_base by default, or an encoding / model name ----
+
+query III
+SELECT tiktoken_encode('hello world'), tiktoken_encode('hello world', 'cl100k_base'), tiktoken_encode('hello world', 'gpt-4');
+----
+[24912, 2375]	[15339, 1917]	[15339, 1917]
+
+query I
+SELECT tiktoken_encode('The quick brown fox jumps over the lazy dog.', 'gpt-4o-mini');
+----
+[976, 4853, 19705, 68347, 65613, 1072, 290, 29082, 6446, 13]
+
+# special tokens are ordinary text, as in encode_ordinary
+query II
+SELECT tiktoken_encode('<|endoftext|>'), tiktoken_encode('<|endoftext|>', 'cl100k_base');
+----
+[27, 91, 419, 1440, 919, 91, 29]	[27, 91, 8862, 728, 428, 91, 29]
+
+query II
+SELECT tiktoken_encode('日本語のテキスト 🦀'), tiktoken_encode(E'  a  \n\n b');
+----
+[9048, 40909, 3385, 16056, 18368, 38236, 9552, 99, 222]	[220, 261, 11691, 287]
+
+query I
+SELECT tiktoken_encode('');
+----
+[]
+
+# ---- count ----
+
+query III
+SELECT tiktoken_count('hello world'), tiktoken_count('日本語のテキスト 🦀', 'cl100k_base'), tiktoken_count('');
+----
+2	11	0
+
+# ---- decode ----
+
+query II
+SELECT tiktoken_decode([24912, 2375]), tiktoken_decode([15339, 1917], 'cl100k_base');
+----
+hello world	hello world
+
+# a token that splits a character decodes to U+FFFD, like tiktoken
+query I
+SELECT tiktoken_decode(tiktoken_encode('🦀')[1:1]) = '�';
+----
+true
+
+query I
+SELECT tiktoken_decode([]);
+----
+(empty)
+
+statement error
+SELECT tiktoken_decode([200018]);
+----
+invalid token id 200018
+
+statement error
+SELECT tiktoken_decode([-1]);
+----
+invalid token id -1
+
+statement error
+SELECT tiktoken_decode([1, NULL]);
+----
+token list contains NULL
+
+# ---- truncate ----
+
+query III
+SELECT tiktoken_truncate('The quick brown fox jumps over the lazy dog.', 0),
+       tiktoken_truncate('The quick brown fox jumps over the lazy dog.', 3),
+       tiktoken_truncate('The quick brown fox jumps over the lazy dog.', 100);
+----
+(empty)	The quick brown	The quick brown fox jumps over the lazy dog.
+
+# never cuts inside a character
+query II
+SELECT tiktoken_truncate('🦀🦀', 1), tiktoken_truncate('🦀🦀', 1, 'cl100k_base');
+----
+(empty)	(empty)
+
+statement error
+SELECT tiktoken_truncate('hello', -1);
+----
+max_tokens must not be negative
+
+# ---- NULLs and errors ----
+
+query IIII
+SELECT tiktoken_count(NULL), tiktoken_count('a', NULL), tiktoken_decode(NULL), tiktoken_truncate('a', NULL);
+----
+NULL	NULL	NULL	NULL
+
+statement error
+SELECT tiktoken_count('hello', 'p50k_base');
+----
+encoding 'p50k_base' is not supported; use o200k_base or cl100k_base
+
+statement error
+SELECT tiktoken_count('hello', 'llama-3');
+----
+unknown encoding or model 'llama-3'
+
+# ---- over many rows and chunks: constant and per-row encodings ----
+
+statement ok
+CREATE TABLE docs AS
+SELECT i, CASE WHEN i % 100 = 0 THEN NULL ELSE 'doc ' || i || ' ' || repeat('日本語 🦀 hello  ', i % 7) END AS body,
+       CASE WHEN i % 2 = 0 THEN 'o200k_base' ELSE 'cl100k_base' END AS enc
+FROM range(5000) r(i);
+
+query IIII
+SELECT count(*), count(body), sum(tiktoken_count(body)) > 0, count(tiktoken_count(body, enc))
+FROM docs;
+----
+5000	4950	true	4950
+
+# encode and count agree, decode round-trips, and truncate respects the limit
+query I
+SELECT count(*) FROM docs
+WHERE len(tiktoken_encode(body, enc)) <> tiktoken_count(body, enc)
+   OR tiktoken_decode(tiktoken_encode(body, enc), enc) <> body
+   OR tiktoken_count(tiktoken_truncate(body, 5, enc), enc) > 5
+   OR NOT starts_with(body, tiktoken_truncate(body, i % 13, enc));
+----
+0
+
+# the per-row encoding is actually used
+query I
+SELECT count(*) FROM docs
+WHERE tiktoken_count(body, enc) <> CASE WHEN enc = 'o200k_base' THEN tiktoken_count(body) ELSE tiktoken_count(body, 'cl100k_base') END;
+----
+0

@@ -1,0 +1,20 @@
+[package]
+name = "tiktoken"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+lto = true
+strip = true
+
+[dependencies]
+duckdb = { version = "~1.10505.0", features = ["loadable-extension", "vscalar"] }
+# BPE dictionaries from GitHub's linear-time BPE. Output is identical to tiktoken's encode_ordinary.
+bpe-openai = "0.3"
+rayon = "1"
+regex-automata = "0.4"
